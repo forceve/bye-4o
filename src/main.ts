@@ -1,5 +1,5 @@
 import * as THREE from "https://esm.sh/three@0.161.0";
-import { Fire } from "https://esm.sh/@wolffo/three-fire";
+import { Fire } from "./fire.js";
 
 const canvas = document.getElementById("scene") as HTMLCanvasElement | null;
 if (!canvas) {
