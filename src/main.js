@@ -1,7 +1,4 @@
 const canvas = document.getElementById("scene");
-const overlay = document.getElementById("overlay");
-const startButton = document.getElementById("start");
-
 const gl = canvas.getContext("webgl", { antialias: true, premultipliedAlpha: false });
 if (!gl) {
   throw new Error("WebGL not supported");
@@ -59,33 +56,118 @@ void main() {
 }
 `;
 
-const pointVertexShaderSource = `
+const fireVertexShaderSource = `
 attribute vec3 aPosition;
 attribute float aSize;
+attribute float aSeed;
 
 uniform mat4 uProjection;
 uniform mat4 uView;
-uniform vec3 uColor;
+uniform float uTime;
 
-varying vec3 vColor;
+varying vec3 vWorldPos;
+varying float vSeed;
+varying float vHeight;
 
 void main() {
-  vec4 viewPos = uView * vec4(aPosition, 1.0);
+  vec3 jittered = aPosition;
+  jittered.y += sin(uTime * 1.4 + aSeed * 6.0) * 0.02;
+  vec4 viewPos = uView * vec4(jittered, 1.0);
   gl_Position = uProjection * viewPos;
-  gl_PointSize = aSize;
-  vColor = uColor;
+  float depth = max(-viewPos.z, 1.0);
+  gl_PointSize = aSize * (280.0 / depth);
+  vWorldPos = jittered;
+  vSeed = aSeed;
+  vHeight = jittered.y;
 }
 `;
 
-const pointFragmentShaderSource = `
+// Simplex noise from https://github.com/ashima/webgl-noise (MIT License).
+const fireFragmentShaderSource = `
 precision mediump float;
 
-varying vec3 vColor;
+uniform float uTime;
+
+varying vec3 vWorldPos;
+varying float vSeed;
+varying float vHeight;
+
+vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v) {
+  const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+  vec3 i = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+
+  i = mod289(i);
+  vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x +
+                   vec4(0.0, i1.x, i2.x, 1.0));
+
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+
+  vec4 x = x_ * ns.x + ns.yyyy;
+  vec4 y = y_ * ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+
+  vec4 s0 = floor(b0) * 2.0 + 1.0;
+  vec4 s1 = floor(b1) * 2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+
+  vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+
+  vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+  p0 *= norm.x;
+  p1 *= norm.y;
+  p2 *= norm.z;
+  p3 *= norm.w;
+
+  vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
 
 void main() {
   float dist = distance(gl_PointCoord, vec2(0.5));
-  float alpha = smoothstep(0.5, 0.1, dist);
-  gl_FragColor = vec4(vColor, alpha);
+  float base = smoothstep(0.52, 0.1, dist);
+  float noiseVal = snoise(vec3(vWorldPos.x * 2.2, vWorldPos.y * 3.2 + uTime * 0.8, vWorldPos.z * 2.2 + vSeed));
+  float flicker = 0.65 + 0.35 * (noiseVal * 0.5 + 0.5);
+  float heightGlow = clamp(vHeight * 2.6, 0.0, 1.0);
+  float intensity = base * flicker * (0.6 + heightGlow);
+
+  vec3 coreColor = vec3(1.0, 0.45, 0.08);
+  vec3 tipColor = vec3(1.0, 0.88, 0.45);
+  vec3 color = mix(coreColor, tipColor, heightGlow);
+
+  gl_FragColor = vec4(color * intensity * 1.35, intensity);
 }
 `;
 
@@ -119,7 +201,7 @@ const createProgram = (vsSource, fsSource) => {
 };
 
 const program = createProgram(vertexShaderSource, fragmentShaderSource);
-const pointProgram = createProgram(pointVertexShaderSource, pointFragmentShaderSource);
+const fireProgram = createProgram(fireVertexShaderSource, fireFragmentShaderSource);
 
 const identity = () => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -433,15 +515,103 @@ const createBox = (width, height, depth) => {
   return { positions, normals, indices };
 };
 
-const createCirclePoints = (radius, segments, y) => {
-  const data = new Float32Array(segments * 3);
-  for (let i = 0; i < segments; i += 1) {
-    const angle = (i / segments) * Math.PI * 2;
-    data[i * 3] = Math.cos(angle) * radius;
-    data[i * 3 + 1] = y;
-    data[i * 3 + 2] = Math.sin(angle) * radius;
+const combineMeshes = (meshes) => {
+  let positionLength = 0;
+  let normalLength = 0;
+  let indexLength = 0;
+  for (const mesh of meshes) {
+    positionLength += mesh.positions.length;
+    normalLength += mesh.normals.length;
+    indexLength += mesh.indices.length;
   }
-  return data;
+
+  const positions = new Float32Array(positionLength);
+  const normals = new Float32Array(normalLength);
+  const indices = new Uint16Array(indexLength);
+
+  let positionOffset = 0;
+  let normalOffset = 0;
+  let indexOffset = 0;
+  let vertexOffset = 0;
+
+  for (const mesh of meshes) {
+    positions.set(mesh.positions, positionOffset);
+    normals.set(mesh.normals, normalOffset);
+    for (let i = 0; i < mesh.indices.length; i += 1) {
+      indices[indexOffset + i] = mesh.indices[i] + vertexOffset;
+    }
+    positionOffset += mesh.positions.length;
+    normalOffset += mesh.normals.length;
+    indexOffset += mesh.indices.length;
+    vertexOffset += mesh.positions.length / 3;
+  }
+
+  return { positions, normals, indices };
+};
+
+const createRingFloor = (innerRadius, outerRadius, y, segments) => {
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  for (let i = 0; i < segments; i += 1) {
+    const angle0 = (i / segments) * Math.PI * 2;
+    const angle1 = ((i + 1) / segments) * Math.PI * 2;
+    const inner0 = [Math.cos(angle0) * innerRadius, y, Math.sin(angle0) * innerRadius];
+    const outer0 = [Math.cos(angle0) * outerRadius, y, Math.sin(angle0) * outerRadius];
+    const inner1 = [Math.cos(angle1) * innerRadius, y, Math.sin(angle1) * innerRadius];
+    const outer1 = [Math.cos(angle1) * outerRadius, y, Math.sin(angle1) * outerRadius];
+
+    const baseIndex = positions.length / 3;
+    positions.push(outer0[0], outer0[1], outer0[2]);
+    positions.push(inner0[0], inner0[1], inner0[2]);
+    positions.push(inner1[0], inner1[1], inner1[2]);
+    positions.push(outer1[0], outer1[1], outer1[2]);
+
+    for (let n = 0; n < 4; n += 1) {
+      normals.push(0, 1, 0);
+    }
+
+    indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+    indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+  }
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    indices: new Uint16Array(indices),
+  };
+};
+
+const createRingWall = (radius, yBottom, yTop, segments, inward) => {
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  for (let i = 0; i < segments; i += 1) {
+    const angle0 = (i / segments) * Math.PI * 2;
+    const angle1 = ((i + 1) / segments) * Math.PI * 2;
+    const dir0 = [Math.cos(angle0), 0, Math.sin(angle0)];
+    const dir1 = [Math.cos(angle1), 0, Math.sin(angle1)];
+    const normal0 = inward ? [-dir0[0], 0, -dir0[2]] : [dir0[0], 0, dir0[2]];
+    const normal1 = inward ? [-dir1[0], 0, -dir1[2]] : [dir1[0], 0, dir1[2]];
+
+    const baseIndex = positions.length / 3;
+    positions.push(dir0[0] * radius, yBottom, dir0[2] * radius);
+    positions.push(dir0[0] * radius, yTop, dir0[2] * radius);
+    positions.push(dir1[0] * radius, yTop, dir1[2] * radius);
+    positions.push(dir1[0] * radius, yBottom, dir1[2] * radius);
+
+    normals.push(normal0[0], normal0[1], normal0[2]);
+    normals.push(normal0[0], normal0[1], normal0[2]);
+    normals.push(normal1[0], normal1[1], normal1[2]);
+    normals.push(normal1[0], normal1[1], normal1[2]);
+
+    indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+    indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+  }
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    indices: new Uint16Array(indices),
+  };
 };
 
 const bindMesh = (mesh) => {
@@ -463,15 +633,28 @@ const bindMesh = (mesh) => {
 
 const groundMesh = createPlane(30);
 const obeliskMesh = createBox(1.2, 6, 1.2);
-const benchMesh = createBox(4.6, 0.5, 1.1);
+const benchSeatMesh = createBox(4.2, 0.45, 1.2);
+const benchLegMesh = createBox(0.5, 0.7, 0.9);
+const ringGrooveMesh = combineMeshes([
+  createRingFloor(0.55, 0.9, -0.05, 96),
+  createRingWall(0.55, -0.05, 0.04, 96, true),
+  createRingWall(0.9, -0.05, 0.04, 96, false),
+]);
 
 const renderables = [
   {
     mesh: groundMesh,
-    model: multiply(translation(0, 0, 0), scale(1, 1, 1)),
+    model: multiply(translation(0, -0.04, 0), scale(1, 1, 1)),
     color: [0.82, 0.82, 0.8],
     emissive: [0.02, 0.02, 0.02],
     shininess: 4,
+  },
+  {
+    mesh: ringGrooveMesh,
+    model: multiply(translation(0, 0.04, 0), rotateY(0)),
+    color: [0.32, 0.32, 0.34],
+    emissive: [0.02, 0.02, 0.02],
+    shininess: 18,
   },
   {
     mesh: obeliskMesh,
@@ -481,28 +664,51 @@ const renderables = [
     shininess: 64,
   },
   {
-    mesh: benchMesh,
-    model: multiply(translation(-3, 0.25, 1.2), rotateY(-0.2)),
-    color: [0.68, 0.68, 0.68],
-    emissive: [0.02, 0.02, 0.02],
-    shininess: 10,
+    mesh: benchSeatMesh,
+    model: multiply(translation(0, 0.55, 2.3), rotateY(0)),
+    color: [0.2, 0.2, 0.22],
+    emissive: [0.01, 0.01, 0.01],
+    shininess: 22,
+  },
+  {
+    mesh: benchLegMesh,
+    model: multiply(translation(-1.6, 0.35, 2.3), rotateY(0)),
+    color: [0.18, 0.18, 0.2],
+    emissive: [0.01, 0.01, 0.01],
+    shininess: 18,
+  },
+  {
+    mesh: benchLegMesh,
+    model: multiply(translation(1.6, 0.35, 2.3), rotateY(0)),
+    color: [0.18, 0.18, 0.2],
+    emissive: [0.01, 0.01, 0.01],
+    shininess: 18,
   },
 ];
 
 const buffers = renderables.map((renderable) => ({ renderable, ...bindMesh(renderable.mesh) }));
 
-const ringPoints = createCirclePoints(0.55, 80, 0.05);
-const ringBuffer = gl.createBuffer();
-if (!ringBuffer) {
-  throw new Error("Unable to create ring buffer");
+const firePointCount = 460;
+const firePositions = new Float32Array(firePointCount * 3);
+const fireSizes = new Float32Array(firePointCount);
+const fireSeeds = new Float32Array(firePointCount);
+
+for (let i = 0; i < firePointCount; i += 1) {
+  const angle = (i / firePointCount) * Math.PI * 2;
+  const radius = 0.62 + Math.random() * 0.08;
+  firePositions[i * 3] = Math.cos(angle) * radius + (Math.random() - 0.5) * 0.05;
+  firePositions[i * 3 + 1] = 0.06 + Math.random() * 0.25;
+  firePositions[i * 3 + 2] = Math.sin(angle) * radius + (Math.random() - 0.5) * 0.05;
+  fireSizes[i] = 18 + Math.random() * 14;
+  fireSeeds[i] = Math.random() * 10;
 }
 
-const sparkBuffer = gl.createBuffer();
-if (!sparkBuffer) {
-  throw new Error("Unable to create spark buffer");
+const firePositionBuffer = gl.createBuffer();
+const fireSizeBuffer = gl.createBuffer();
+const fireSeedBuffer = gl.createBuffer();
+if (!firePositionBuffer || !fireSizeBuffer || !fireSeedBuffer) {
+  throw new Error("Unable to create fire buffers");
 }
-
-let spark = { position: [0, 0.1, 0], life: 0 };
 
 const setCanvasSize = () => {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -536,10 +742,10 @@ const programUniforms = {
   fogFar: getUniformLocation(program, "uFogFar"),
 };
 
-const pointUniforms = {
-  projection: getUniformLocation(pointProgram, "uProjection"),
-  view: getUniformLocation(pointProgram, "uView"),
-  color: getUniformLocation(pointProgram, "uColor"),
+const fireUniforms = {
+  projection: getUniformLocation(fireProgram, "uProjection"),
+  view: getUniformLocation(fireProgram, "uView"),
+  time: getUniformLocation(fireProgram, "uTime"),
 };
 
 const cameraPos = [0, 4, 12];
@@ -548,7 +754,7 @@ const up = [0, 1, 0];
 
 const lightDir = normalize([0.3, 1.0, 0.2]);
 
-const render = () => {
+const render = (time) => {
   const aspect = canvas.width / canvas.height;
   const projection = perspective((55 * Math.PI) / 180, aspect, 0.1, 60);
   const view = lookAt(cameraPos, target, up);
@@ -591,43 +797,37 @@ const render = () => {
     gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_SHORT, 0);
   }
 
-  gl.useProgram(pointProgram);
-  gl.uniformMatrix4fv(pointUniforms.projection, false, projection);
-  gl.uniformMatrix4fv(pointUniforms.view, false, view);
+  gl.useProgram(fireProgram);
+  gl.uniformMatrix4fv(fireUniforms.projection, false, projection);
+  gl.uniformMatrix4fv(fireUniforms.view, false, view);
+  gl.uniform1f(fireUniforms.time, time * 0.001);
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, ringBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, ringPoints, gl.STATIC_DRAW);
-  const ringLocation = gl.getAttribLocation(pointProgram, "aPosition");
-  gl.enableVertexAttribArray(ringLocation);
-  gl.vertexAttribPointer(ringLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
 
-  const sizeLocation = gl.getAttribLocation(pointProgram, "aSize");
-  gl.disableVertexAttribArray(sizeLocation);
-  gl.vertexAttrib1f(sizeLocation, 6.0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, firePositionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, firePositions, gl.STATIC_DRAW);
+  const firePositionLocation = gl.getAttribLocation(fireProgram, "aPosition");
+  gl.enableVertexAttribArray(firePositionLocation);
+  gl.vertexAttribPointer(firePositionLocation, 3, gl.FLOAT, false, 0, 0);
 
-  gl.uniform3fv(pointUniforms.color, new Float32Array([0.35, 0.06, 0.05]));
-  gl.drawArrays(gl.POINTS, 0, ringPoints.length / 3);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fireSizeBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fireSizes, gl.STATIC_DRAW);
+  const fireSizeLocation = gl.getAttribLocation(fireProgram, "aSize");
+  gl.enableVertexAttribArray(fireSizeLocation);
+  gl.vertexAttribPointer(fireSizeLocation, 1, gl.FLOAT, false, 0, 0);
 
-  if (spark.life <= 0 && Math.random() > 0.985) {
-    spark = {
-      position: [(Math.random() - 0.5) * 0.3, 0.08, (Math.random() - 0.5) * 0.3],
-      life: 1,
-    };
-  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, fireSeedBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fireSeeds, gl.STATIC_DRAW);
+  const fireSeedLocation = gl.getAttribLocation(fireProgram, "aSeed");
+  gl.enableVertexAttribArray(fireSeedLocation);
+  gl.vertexAttribPointer(fireSeedLocation, 1, gl.FLOAT, false, 0, 0);
 
-  if (spark.life > 0) {
-    spark.life -= 0.02;
-    spark.position[1] += 0.02;
+  gl.drawArrays(gl.POINTS, 0, firePointCount);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, sparkBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(spark.position), gl.DYNAMIC_DRAW);
-    gl.enableVertexAttribArray(ringLocation);
-    gl.vertexAttribPointer(ringLocation, 3, gl.FLOAT, false, 0, 0);
-    gl.disableVertexAttribArray(sizeLocation);
-    gl.vertexAttrib1f(sizeLocation, 10.0);
-    gl.uniform3fv(pointUniforms.color, new Float32Array([0.6, 0.1, 0.05]));
-    gl.drawArrays(gl.POINTS, 0, 1);
-  }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
 
   requestAnimationFrame(render);
 };
@@ -693,11 +893,12 @@ const createAudio = () => {
 
 let audioContext = null;
 
-startButton.addEventListener("click", () => {
-  overlay.classList.add("hidden");
+const handleAudioStart = () => {
   if (!audioContext) {
     audioContext = createAudio();
   }
-});
+};
+
+canvas.addEventListener("pointerdown", handleAudioStart, { once: true });
 
 requestAnimationFrame(render);
