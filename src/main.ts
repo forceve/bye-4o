@@ -73,6 +73,8 @@ void main() {
 `;
 
 const fireVertexShaderSource = `
+precision mediump float;
+
 attribute vec3 aPosition;
 attribute float aSize;
 attribute float aSeed;
